@@ -554,7 +554,8 @@ typedef struct {
 
 typedef struct {
 	uint32_t packet_count;
-	uint32_t octet_count;
+	uint32_t octet_count; 
+	uint32_t peer_ssrc;
 } switch_rtcp_numbers_t;
 
 typedef struct {
@@ -1233,6 +1234,7 @@ typedef enum {
 	CF_PICKUP,
 	CF_CONFIRM_BLIND_TRANSFER,
 	CF_NO_PRESENCE,
+	CF_CONFERENCE,
 	/* WARNING: DO NOT ADD ANY FLAGS BELOW THIS LINE */
 	/* IF YOU ADD NEW ONES CHECK IF THEY SHOULD PERSIST OR ZERO THEM IN switch_core_session.c switch_core_session_request_xml() */
 	CF_FLAG_MAX
@@ -1654,6 +1656,10 @@ typedef enum {
 	SWITCH_EVENT_SOCKET_DATA,
 	SWITCH_EVENT_MEDIA_BUG_START,
 	SWITCH_EVENT_MEDIA_BUG_STOP,
+	SWITCH_EVENT_CONFERENCE_DATA_QUERY,
+	SWITCH_EVENT_CONFERENCE_DATA,
+	SWITCH_EVENT_CALL_SETUP_REQ,
+	SWITCH_EVENT_CALL_SETUP_RESULT,
 	SWITCH_EVENT_ALL
 } switch_event_types_t;
 
@@ -1769,6 +1775,7 @@ typedef enum {
 	SCSC_THREADED_SYSTEM_EXEC,
 	SCSC_SYNC_CLOCK_WHEN_IDLE,
 	SCSC_DEBUG_SQL,
+	SCSC_SQL,
 } switch_session_ctl_t;
 
 typedef enum {

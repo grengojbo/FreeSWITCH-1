@@ -82,6 +82,8 @@ static void send_heartbeat(void)
 								duration.sec, duration.sec == 1 ? "" : "s",
 								duration.ms, duration.ms == 1 ? "" : "s", duration.mms, duration.mms == 1 ? "" : "s");
 
+		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "FreeSWITCH-Version", SWITCH_VERSION_FULL);
+		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "Uptime-msec", "%"SWITCH_TIME_T_FMT, switch_core_uptime() / 1000);
 		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "Session-Count", "%u", switch_core_session_count());
 		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "Max-Sessions", "%u", switch_core_session_limit(0));
 		switch_event_add_header(event, SWITCH_STACK_BOTTOM, "Session-Per-Sec", "%u", runtime.sps);
@@ -2122,6 +2124,13 @@ SWITCH_DECLARE(int32_t) switch_core_session_ctl(switch_session_ctl_t cmd, void *
 		break;
 	case SCSC_SYNC_CLOCK_WHEN_IDLE:
 		newintval = switch_core_session_sync_clock();
+		break;
+	case SCSC_SQL:
+		if (oldintval) {
+			switch_core_sqldb_start_thread();
+		} else {
+			switch_core_sqldb_stop_thread();
+		}
 		break;
 	case SCSC_PAUSE_ALL:
 		if (oldintval) {

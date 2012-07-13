@@ -1189,8 +1189,65 @@ static void our_sofia_event_callback(nua_event_t event,
 	case nua_r_refer:
 		break;
 	case nua_i_refer:
-		if (session)
+		if (session) {
 			sofia_handle_sip_i_refer(nua, profile, nh, session, sip, de, tags);
+		} else {
+			const char *req_user = NULL, *req_host = NULL, *action = NULL, *ref_by_user = NULL, *ref_to_user = NULL, *ref_to_host = NULL;
+			char *refer_to = NULL, *referred_by = NULL, *method = NULL;
+			char *params = NULL;
+			switch_event_t *event;
+
+			if (sip->sip_refer_to) {
+				ref_to_user = sip->sip_refer_to->r_url->url_user;
+				ref_to_host = sip->sip_refer_to->r_url->url_host;
+
+				refer_to = sip_header_as_string(nua_handle_home(nh), (void *) sip->sip_refer_to);
+				if ((params = strchr(refer_to, ';'))) {
+					*params++ = '\0';
+					if ((method = switch_find_parameter(params, "method", NULL))) {
+						if (!strcasecmp(method, "INVITE")) {
+							action = "call";
+						} else if (!strcasecmp(method, "BYE")) {
+							action = "end";
+						} else {
+							action = method;
+						}
+					}
+				}
+
+				refer_to = sofia_glue_get_url_from_contact(refer_to, 0);
+					
+			}
+			
+			if (sip->sip_referred_by) {
+				referred_by = sofia_glue_get_url_from_contact(sip_header_as_string(nua_handle_home(nh), (void *) sip->sip_referred_by), 0);
+				ref_by_user = sip->sip_referred_by->b_url->url_user;
+			}
+
+			if (sip->sip_request && sip->sip_request->rq_url) {
+				req_user = sip->sip_request->rq_url->url_user;
+				req_host = sip->sip_request->rq_url->url_host;
+			}
+
+			if (switch_event_create(&event, SWITCH_EVENT_CALL_SETUP_REQ) == SWITCH_STATUS_SUCCESS) {
+				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Requesting-Component", "mod_sofia");
+				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Target-Component", req_user);
+				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Target-Domain", req_host);
+				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Request-Action", action);
+				switch_event_add_header(event, SWITCH_STACK_BOTTOM, "Request-Target", "sofia/%s/%s", profile->name, refer_to);
+				switch_event_add_header(event, SWITCH_STACK_BOTTOM, "Request-Target-URI", "%s", refer_to);
+				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Request-Target-Extension", ref_to_user);
+				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Request-Target-Domain", ref_to_host);
+				switch_event_add_header(event, SWITCH_STACK_BOTTOM, "Request-Sender", "sofia/%s/%s", profile->name, referred_by);
+				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "var_origination_caller_id_number", ref_by_user);
+				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "var_origination_caller_id_name", ref_by_user);
+				switch_event_fire(&event);
+			}
+
+			nua_respond(nh, SIP_202_ACCEPTED, NUTAG_WITH_THIS_MSG(de->data->e_msg), TAG_END());
+			switch_safe_free(method);
+
+		}
 		break;
 	case nua_r_subscribe:
 		sofia_presence_handle_sip_r_subscribe(status, phrase, nua, profile, nh, sofia_private, sip, de, tags);
@@ -2112,13 +2169,6 @@ void *SWITCH_THREAD_FUNC sofia_profile_thread_run(switch_thread_t *thread, void 
 	
 	nua_set_params(profile->nua,
 				   SIPTAG_ALLOW_STR("INVITE, ACK, BYE, CANCEL, OPTIONS, MESSAGE, UPDATE, INFO"),
-				   NUTAG_APPL_METHOD("OPTIONS"),
-				   NUTAG_APPL_METHOD("REFER"),
-				   NUTAG_APPL_METHOD("REGISTER"),
-				   NUTAG_APPL_METHOD("NOTIFY"), NUTAG_APPL_METHOD("INFO"), NUTAG_APPL_METHOD("ACK"), NUTAG_APPL_METHOD("SUBSCRIBE"),
-#ifdef MANUAL_BYE
-				   NUTAG_APPL_METHOD("BYE"),
-#endif
 				   NUTAG_AUTOANSWER(0),
 				   NUTAG_AUTOACK(0),
 				   NUTAG_AUTOALERT(0),
@@ -2131,6 +2181,15 @@ void *SWITCH_THREAD_FUNC sofia_profile_thread_run(switch_thread_t *thread, void 
 				   NUTAG_ALLOW("NOTIFY"),
 				   NUTAG_ALLOW_EVENTS("talk"),
 				   NUTAG_ALLOW_EVENTS("hold"),
+				   NUTAG_ALLOW_EVENTS("conference"),
+				   NUTAG_APPL_METHOD("OPTIONS"),
+				   NUTAG_APPL_METHOD("REFER"),
+				   NUTAG_APPL_METHOD("REGISTER"),
+				   NUTAG_APPL_METHOD("NOTIFY"), NUTAG_APPL_METHOD("INFO"), NUTAG_APPL_METHOD("ACK"), NUTAG_APPL_METHOD("SUBSCRIBE"),
+#ifdef MANUAL_BYE
+				   NUTAG_APPL_METHOD("BYE"),
+#endif
+
 				   NUTAG_SESSION_TIMER(profile->session_timeout),
 				   NTATAG_MAX_PROCEEDING(profile->max_proceeding),
 				   TAG_IF(profile->pres_type, NUTAG_ALLOW("PUBLISH")),
@@ -5041,11 +5100,13 @@ static void sofia_handle_sip_r_options(switch_core_session_t *session, int statu
 	} else if (sofia_test_pflag(profile, PFLAG_UNREG_OPTIONS_FAIL) && (status != 200 && status != 486) && sip && sip->sip_to) {
 		char *sql;
 		time_t now = switch_epoch_time_now(NULL);
+		const char *call_id = sip->sip_call_id->i_id;
+
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Expire registration '%s@%s' due to options failure\n",
 						  sip->sip_to->a_url->url_user, sip->sip_to->a_url->url_host);
 
-		sql = switch_mprintf("update sip_registrations set expires=%ld where sip_user='%s' and sip_host='%s'",
-							 (long) now, sip->sip_to->a_url->url_user, sip->sip_to->a_url->url_host);
+		sql = switch_mprintf("update sip_registrations set expires=%ld where sip_user='%s' and sip_host='%s' and call_id='%q'",
+							 (long) now, sip->sip_to->a_url->url_user, sip->sip_to->a_url->url_host, call_id);
 		sofia_glue_execute_sql(profile, &sql, SWITCH_TRUE);
 	}
 }
@@ -5630,7 +5691,6 @@ static void sofia_handle_sip_r_invite(switch_core_session_t *session, int status
 	}
 }
 
-
 /* Pure black magic, if you can't understand this code you are lucky.........*/
 void *SWITCH_THREAD_FUNC media_on_hold_thread_run(switch_thread_t *thread, void *obj)
 {
@@ -5643,10 +5703,12 @@ void *SWITCH_THREAD_FUNC media_on_hold_thread_run(switch_thread_t *thread, void 
 
 		if ((uuid = switch_channel_get_partner_uuid(channel)) && (other_session = switch_core_session_locate(uuid))) {
 			if (switch_core_session_compare(session, other_session)) {
+				switch_channel_t *other_channel = switch_core_session_get_channel(other_session);
 				sofia_set_flag_locked(tech_pvt, TFLAG_HOLD_LOCK);
 
-				switch_yield(100000);
+				switch_yield(250000);
 				switch_channel_wait_for_flag(channel, CF_MEDIA_ACK, SWITCH_TRUE, 10000, NULL);
+				switch_channel_wait_for_flag(other_channel, CF_MEDIA_ACK, SWITCH_TRUE, 10000, NULL);
 				
 				switch_ivr_media(switch_core_session_get_uuid(other_session), SMF_REBRIDGE);
 
@@ -5676,6 +5738,8 @@ static void launch_media_on_hold(switch_core_session_t *session)
 	switch_threadattr_priority_increase(thd_attr);
 	switch_thread_create(&thread, thd_attr, media_on_hold_thread_run, session, switch_core_session_get_pool(session));
 }
+
+
 
 static void mark_transfer_record(switch_core_session_t *session, const char *br_a, const char *br_b)
 {
@@ -6281,9 +6345,11 @@ static void sofia_handle_sip_i_state(switch_core_session_t *session, int status,
 												SIPTAG_CONTACT_STR(tech_pvt->reply_contact),
 												SIPTAG_CONTENT_TYPE_STR("application/sdp"), SIPTAG_PAYLOAD_STR(tech_pvt->local_sdp_str), TAG_END());
 								}
+
+								switch_channel_set_flag(channel, CF_PROXY_MODE);
+								switch_yield(250000);
 								launch_media_on_hold(session);
 
-								switch_core_session_rwunlock(other_session);
 								goto done;
 							}
 						}
@@ -6827,11 +6893,13 @@ void sofia_handle_sip_i_refer(nua_t *nua, sofia_profile_t *profile, nua_handle_t
 		goto done;
 	}
 
+	printf("DICK %d\n", __LINE__);
+
 	if (!sip->sip_cseq || !(etmp = switch_mprintf("refer;id=%u", sip->sip_cseq->cs_seq))) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Memory Error!\n");
 		goto done;
 	}
-
+	printf("DICK %d\n", __LINE__);
 	from = sip->sip_from;
 	//to = sip->sip_to;
 
@@ -6848,7 +6916,7 @@ void sofia_handle_sip_i_refer(nua_t *nua, sofia_profile_t *profile, nua_handle_t
 	}
 
 	if ((refer_to = sip->sip_refer_to)) {
-		char *rep;
+		char *rep = NULL;
 		full_ref_to = sip_header_as_string(home, (void *) sip->sip_refer_to);
 
 		if (sofia_test_pflag(profile, PFLAG_FULL_ID)) {
@@ -6859,7 +6927,16 @@ void sofia_handle_sip_i_refer(nua_t *nua, sofia_profile_t *profile, nua_handle_t
 
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Process REFER to [%s@%s]\n", exten, (char *) refer_to->r_url->url_host);
 
-		if (refer_to->r_url->url_headers && (rep = (char *) switch_stristr("Replaces=", refer_to->r_url->url_headers))) {
+
+		if (refer_to->r_url &&  refer_to->r_url->url_headers) {
+			rep = (char *) switch_stristr("Replaces=", refer_to->r_url->url_headers);
+		}
+
+		printf("WTFX %s\n", rep);
+
+		if (!rep) {
+			printf("WTF [%s]\n", refer_to->r_url->url_headers);
+		} else {
 			sip_replaces_t *replaces;
 			nua_handle_t *bnh = NULL;
 

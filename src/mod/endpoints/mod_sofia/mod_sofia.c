@@ -665,7 +665,10 @@ static switch_status_t sofia_answer_channel(switch_core_session_t *session)
 	int is_3pcc = 0;
 	char *sticky = NULL;
 	const char *call_info = switch_channel_get_variable(channel, "presence_call_info_full");
-
+	
+	if (switch_channel_test_flag(channel, CF_CONFERENCE)) {
+		tech_pvt->reply_contact = switch_core_session_sprintf(session, "%s;isfocus", tech_pvt->reply_contact);
+	}
 
 	if(sofia_test_flag(tech_pvt, TFLAG_3PCC_INVITE)) {
 		// SNARK: complete hack to get final ack sent when a 3pcc invite has been passed from the other leg in bypass_media mode.
@@ -4608,15 +4611,6 @@ static switch_call_cause_t sofia_outgoing_channel(switch_core_session_t *session
 			switch_channel_set_variable(nchannel, "sip_route_uri", gateway_ptr->outbound_sticky_proxy);
 		}
 
-		if (gateway_ptr->ob_vars) {
-			switch_event_header_t *hp;
-			for (hp = gateway_ptr->ob_vars->headers; hp; hp = hp->next) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s setting variable [%s]=[%s]\n",
-								  switch_channel_get_name(nchannel), hp->name, hp->value);
-				switch_channel_set_variable(nchannel, hp->name, hp->value);
-			}
-		}
-
 	} else {
 		if (!(dest = strchr(profile_name, '/'))) {
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Invalid URL\n");
@@ -4777,8 +4771,27 @@ static switch_call_cause_t sofia_outgoing_channel(switch_core_session_t *session
 	not_const = (char *) caller_profile->caller_id_number;
 	caller_profile->caller_id_number = switch_sanitize_number(not_const);
 
+
 	//caller_profile->destination_number = switch_core_strdup(caller_profile->pool, dest_num);
 	switch_channel_set_caller_profile(nchannel, caller_profile);
+
+
+	if (gateway_ptr && gateway_ptr->ob_vars) {
+		switch_event_header_t *hp;
+		for (hp = gateway_ptr->ob_vars->headers; hp; hp = hp->next) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s setting variable [%s]=[%s]\n",
+							  switch_channel_get_name(nchannel), hp->name, hp->value);
+			if (!strncmp(hp->name, "p:", 2)) {
+				switch_channel_set_profile_var(nchannel, hp->name + 2, hp->value);
+			} else {
+				switch_channel_set_variable(nchannel, hp->name, hp->value);
+			}
+		}
+	}
+
+
+
+
 	sofia_set_flag_locked(tech_pvt, TFLAG_OUTBOUND);
 	sofia_clear_flag_locked(tech_pvt, TFLAG_LATE_NEGOTIATION);
 	if (switch_channel_get_state(nchannel) == CS_NEW) {
@@ -5554,44 +5567,48 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_sofia_load)
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Waiting for profiles to start\n");
 	switch_yield(1500000);
 
-	if (switch_event_bind_removable(modname, SWITCH_EVENT_CUSTOM, MULTICAST_EVENT, event_handler, NULL,
-									&mod_sofia_globals.custom_node) != SWITCH_STATUS_SUCCESS) {
+	if (switch_event_bind(modname, SWITCH_EVENT_CUSTOM, MULTICAST_EVENT, event_handler, NULL) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Couldn't bind!\n");
 		return SWITCH_STATUS_TERM;
 	}
 
-	if (switch_event_bind_removable(modname, SWITCH_EVENT_PRESENCE_IN, SWITCH_EVENT_SUBCLASS_ANY, sofia_presence_event_handler, NULL,
-									&mod_sofia_globals.in_node) != SWITCH_STATUS_SUCCESS) {
+	if (switch_event_bind(modname, SWITCH_EVENT_CONFERENCE_DATA, SWITCH_EVENT_SUBCLASS_ANY, sofia_presence_event_handler, NULL) != SWITCH_STATUS_SUCCESS) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Couldn't bind!\n");
 		return SWITCH_STATUS_GENERR;
 	}
 
-	if (switch_event_bind_removable(modname, SWITCH_EVENT_PRESENCE_OUT, SWITCH_EVENT_SUBCLASS_ANY, sofia_presence_event_handler, NULL,
-									&mod_sofia_globals.out_node) != SWITCH_STATUS_SUCCESS) {
+	if (switch_event_bind(modname, SWITCH_EVENT_PRESENCE_IN, SWITCH_EVENT_SUBCLASS_ANY, sofia_presence_event_handler, NULL) != SWITCH_STATUS_SUCCESS) {
+
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Couldn't bind!\n");
 		return SWITCH_STATUS_GENERR;
 	}
 
-	if (switch_event_bind_removable(modname, SWITCH_EVENT_PRESENCE_PROBE, SWITCH_EVENT_SUBCLASS_ANY, sofia_presence_event_handler, NULL,
-									&mod_sofia_globals.probe_node) != SWITCH_STATUS_SUCCESS) {
+	if (switch_event_bind(modname, SWITCH_EVENT_PRESENCE_OUT, SWITCH_EVENT_SUBCLASS_ANY, sofia_presence_event_handler, NULL) != SWITCH_STATUS_SUCCESS) {
+
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Couldn't bind!\n");
 		return SWITCH_STATUS_GENERR;
 	}
 
-	if (switch_event_bind_removable(modname, SWITCH_EVENT_ROSTER, SWITCH_EVENT_SUBCLASS_ANY, sofia_presence_event_handler, NULL,
-									&mod_sofia_globals.roster_node) != SWITCH_STATUS_SUCCESS) {
+	if (switch_event_bind(modname, SWITCH_EVENT_PRESENCE_PROBE, SWITCH_EVENT_SUBCLASS_ANY, sofia_presence_event_handler, NULL) != SWITCH_STATUS_SUCCESS) {
+
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Couldn't bind!\n");
 		return SWITCH_STATUS_GENERR;
 	}
 
-	if (switch_event_bind_removable(modname, SWITCH_EVENT_MESSAGE_WAITING, SWITCH_EVENT_SUBCLASS_ANY, sofia_presence_mwi_event_handler, NULL,
-									&mod_sofia_globals.mwi_node) != SWITCH_STATUS_SUCCESS) {
+	if (switch_event_bind(modname, SWITCH_EVENT_ROSTER, SWITCH_EVENT_SUBCLASS_ANY, sofia_presence_event_handler, NULL) != SWITCH_STATUS_SUCCESS) {
+
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Couldn't bind!\n");
 		return SWITCH_STATUS_GENERR;
 	}
 
-	if (switch_event_bind_removable(modname, SWITCH_EVENT_CUSTOM, MY_EVENT_RECOVERY, sofia_glue_track_event_handler, NULL,
-									&mod_sofia_globals.recovery_node) != SWITCH_STATUS_SUCCESS) {
+	if (switch_event_bind(modname, SWITCH_EVENT_MESSAGE_WAITING, SWITCH_EVENT_SUBCLASS_ANY, sofia_presence_mwi_event_handler, NULL) != SWITCH_STATUS_SUCCESS) {
+
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Couldn't bind!\n");
+		return SWITCH_STATUS_GENERR;
+	}
+
+	if (switch_event_bind(modname, SWITCH_EVENT_CUSTOM, MY_EVENT_RECOVERY, sofia_glue_track_event_handler, NULL) != SWITCH_STATUS_SUCCESS) {
+
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Couldn't bind!\n");
 		return SWITCH_STATUS_GENERR;
 	}
@@ -5709,14 +5726,11 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_sofia_shutdown)
 	}
 	switch_mutex_unlock(mod_sofia_globals.mutex);
 
-	switch_event_unbind(&mod_sofia_globals.in_node);
-	switch_event_unbind(&mod_sofia_globals.probe_node);
-	switch_event_unbind(&mod_sofia_globals.out_node);
-	switch_event_unbind(&mod_sofia_globals.roster_node);
-	switch_event_unbind(&mod_sofia_globals.custom_node);
-	switch_event_unbind(&mod_sofia_globals.mwi_node);
-	switch_event_unbind(&mod_sofia_globals.recovery_node);
+	switch_event_unbind_callback(sofia_presence_event_handler);
+	switch_event_unbind_callback(sofia_presence_mwi_event_handler);
+	switch_event_unbind_callback(sofia_glue_track_event_handler);
 	switch_event_unbind_callback(general_event_handler);
+	switch_event_unbind_callback(event_handler);
 
 	while (mod_sofia_globals.threads) {
 		switch_cond_next();

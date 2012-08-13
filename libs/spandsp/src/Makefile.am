@@ -19,9 +19,8 @@
 AM_CFLAGS = $(COMP_VENDOR_CFLAGS)
 AM_LDFLAGS = $(COMP_VENDOR_LDFLAGS)
 
-MAINTAINERCLEANFILES = Makefile.in
-
 DISTCLEANFILES = $(srcdir)/at_interpreter_dictionary.h \
+                 $(srcdir)/cielab_luts.h \
                  $(srcdir)/math_fixed_tables.h \
                  $(srcdir)/v17_v32bis_rx_fixed_rrc.h \
                  $(srcdir)/v17_v32bis_rx_floating_rrc.h \
@@ -46,6 +45,10 @@ DISTCLEANFILES = $(srcdir)/at_interpreter_dictionary.h \
                  $(srcdir)/v29tx_fixed_rrc.h \
                  $(srcdir)/v29tx_floating_rrc.h
 
+CLEANFILES = ${DISTCLEANFILES}
+MOSTLYCLEANFILES = ${DISTCLEANFILES}
+MAINTAINERCLEANFILES = ${DISTCLEANFILES}
+
 EXTRA_DIST = floating_fudge.h \
              libspandsp.dsp \
              libspandsp.2005.sln \
@@ -56,6 +59,7 @@ EXTRA_DIST = floating_fudge.h \
              libtiff.2008.vcproj \
              filter_tools.c \
              make_at_dictionary.c \
+             make_cielab_luts.c \
              make_math_fixed_tables.c \
              make_modem_filter.c \
              msvc/config.h \
@@ -141,8 +145,6 @@ libspandsp_la_SOURCES = ademco_contactid.c \
                         super_tone_rx.c \
                         super_tone_tx.c \
                         swept_tone.c \
-                        t4_rx.c \
-                        t4_tx.c \
                         t30.c \
                         t30_api.c \
                         t30_logging.c \
@@ -152,6 +154,14 @@ libspandsp_la_SOURCES = ademco_contactid.c \
                         t38_gateway.c \
                         t38_non_ecm_buffer.c \
                         t38_terminal.c \
+                        t4_t6_decode.c \
+                        t4_t6_encode.c \
+                        t4_rx.c \
+                        t4_tx.c \
+                        t42.c \
+                        t81_t82_arith_coding.c \
+                        t85_decode.c \
+                        t85_encode.c \
                         testcpuid.c \
                         time_scale.c \
                         timezone.c \
@@ -239,6 +249,9 @@ nobase_include_HEADERS = spandsp/ademco_contactid.h \
                          spandsp/t4_tx.h \
                          spandsp/t4_t6_decode.h \
                          spandsp/t4_t6_encode.h \
+                         spandsp/t42.h \
+                         spandsp/t81_t82_arith_coding.h \
+                         spandsp/t85.h \
                          spandsp/telephony.h \
                          spandsp/time_scale.h \
                          spandsp/timezone.h \
@@ -303,6 +316,9 @@ nobase_include_HEADERS = spandsp/ademco_contactid.h \
                          spandsp/private/t4_tx.h \
                          spandsp/private/t4_t6_decode.h \
                          spandsp/private/t4_t6_encode.h \
+                         spandsp/private/t42.h \
+                         spandsp/private/t81_t82_arith_coding.h \
+                         spandsp/private/t85.h \
                          spandsp/private/time_scale.h \
                          spandsp/private/timezone.h \
                          spandsp/private/tone_detect.h \
@@ -322,19 +338,24 @@ nobase_include_HEADERS = spandsp/ademco_contactid.h \
 
 nodist_include_HEADERS = spandsp.h
 
-noinst_HEADERS = faxfont.h \
+noinst_HEADERS = cielab_luts.h \
+                 faxfont.h \
                  filter_tools.h \
                  gsm0610_local.h \
                  lpc10_encdecs.h \
                  mmx_sse_decs.h \
                  t30_local.h \
                  t4_t6_decode_states.h \
+                 t42_t43_local.h \
                  v17_v32bis_rx_constellation_maps.h \
                  v17_v32bis_tx_constellation_maps.h \
                  v29tx_constellation_maps.h
 
 make_at_dictionary$(EXEEXT): $(top_srcdir)/src/make_at_dictionary.c
 	$(CC_FOR_BUILD) -o make_at_dictionary$(EXEEXT) $(top_srcdir)/src/make_at_dictionary.c  -DHAVE_CONFIG_H -I$(top_builddir)/src
+
+make_cielab_luts$(EXEEXT): $(top_srcdir)/src/make_cielab_luts.c
+	$(CC_FOR_BUILD) -o make_cielab_luts$(EXEEXT) $(top_srcdir)/src/make_cielab_luts.c -DHAVE_CONFIG_H -I$(top_builddir)/src -lm
 
 make_math_fixed_tables$(EXEEXT): $(top_srcdir)/src/make_math_fixed_tables.c
 	$(CC_FOR_BUILD) -o make_math_fixed_tables$(EXEEXT) $(top_srcdir)/src/make_math_fixed_tables.c  -DHAVE_CONFIG_H -I$(top_builddir)/src -lm
@@ -362,6 +383,13 @@ math_fixed_tables.h: make_math_fixed_tables$(EXEEXT)
 t4_rx.$(OBJEXT): spandsp/version.h
 
 t4_rx.lo: spandsp/version.h
+
+t42.$(OBJEXT): cielab_luts.h
+
+t42.lo: cielab_luts.h
+
+cielab_luts.h: make_cielab_luts$(EXEEXT)
+	./make_cielab_luts$(EXEEXT) >cielab_luts.h
 
 V17_V32BIS_RX_INCL = v17_v32bis_rx_fixed_rrc.h \
                      v17_v32bis_rx_floating_rrc.h

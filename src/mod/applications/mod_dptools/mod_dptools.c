@@ -1326,6 +1326,33 @@ static void base_set (switch_core_session_t *session, const char *data, switch_s
 	}
 }
 
+SWITCH_STANDARD_APP(multiset_function)
+{
+	char delim = ' ';
+	char *arg = (char *) data;
+
+	if (!zstr(arg) && *arg == '^' && *(arg+1) == '^') {
+		arg += 2;
+		delim = *arg++;
+	}
+
+	if (arg) {
+		char *array[256] = {0};
+		int i, argc;
+
+		arg = switch_core_session_strdup(session, arg);
+		argc = switch_split(arg, delim, array);
+		
+		for(i = 0; i < argc; i++) {
+			base_set(session, array[i], SWITCH_STACK_BOTTOM);
+		}
+		
+
+	} else {
+		base_set(session, data, SWITCH_STACK_BOTTOM);
+	}
+}
+
 SWITCH_STANDARD_APP(set_function)
 {
 	base_set(session, data, SWITCH_STACK_BOTTOM);
@@ -1403,7 +1430,7 @@ SWITCH_STANDARD_APP(export_function)
 			}
 		}
 
-		switch_channel_export_variable(channel, var, val, SWITCH_EXPORT_VARS_VARIABLE);
+		switch_channel_export_variable_var_check(channel, var, val, SWITCH_EXPORT_VARS_VARIABLE, SWITCH_FALSE);
 	}
 }
 
@@ -1720,7 +1747,7 @@ SWITCH_STANDARD_API(chat_api_function)
 	if (!zstr(cmd) && (lbuf = strdup(cmd))
 		&& (argc = switch_separate_string(lbuf, '|', argv, (sizeof(argv) / sizeof(argv[0])))) >= 4) {
 
-		if (switch_core_chat_send_args(argv[0], "global", argv[1], argv[2], "", argv[3], !zstr(argv[4]) ? argv[4] : NULL, "") == SWITCH_STATUS_SUCCESS) {
+		if (switch_core_chat_send_args(argv[0], "global", argv[1], argv[2], "", argv[3], !zstr(argv[4]) ? argv[4] : NULL, "", SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
 			stream->write_function(stream, "Sent");
 		} else {
 			stream->write_function(stream, "Error! Message Not Sent");
@@ -2126,6 +2153,32 @@ static switch_status_t xfer_on_dtmf(switch_core_session_t *session, void *input,
 	return SWITCH_STATUS_SUCCESS;
 }
 
+static switch_status_t tmp_hanguphook(switch_core_session_t *session)
+{
+	switch_channel_t *channel = switch_core_session_get_channel(session);
+	switch_channel_state_t state = switch_channel_get_state(channel);
+
+	if (state == CS_HANGUP || state == CS_ROUTING) {
+		const char *bond = switch_channel_get_variable(channel, SWITCH_SOFT_HOLDING_UUID_VARIABLE);
+
+		if (!zstr(bond)) {
+			switch_core_session_t *b_session;
+			
+			if ((b_session = switch_core_session_locate(bond))) {
+				switch_channel_t *b_channel = switch_core_session_get_channel(b_session);
+				if (switch_channel_up(b_channel)) {
+					switch_channel_set_flag(b_channel, CF_REDIRECT);
+				}
+				switch_core_session_rwunlock(b_session);
+			}
+		}
+
+		switch_core_event_hook_remove_state_change(session, tmp_hanguphook);
+	}
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
 static switch_status_t hanguphook(switch_core_session_t *session)
 {
 	switch_channel_t *channel = switch_core_session_get_channel(session);
@@ -2160,14 +2213,13 @@ SWITCH_STANDARD_APP(att_xfer_function)
 	switch_channel_t *channel, *peer_channel = NULL;
 	const char *bond = NULL;
 	switch_core_session_t *b_session = NULL;
-
+	
 	channel = switch_core_session_get_channel(session);
 
-	if ((bond = switch_channel_get_partner_uuid(channel))) {
-		bond = switch_core_session_strdup(session, bond);
-	}
-
+	bond = switch_channel_get_partner_uuid(channel);
 	switch_channel_set_variable(channel, SWITCH_SOFT_HOLDING_UUID_VARIABLE, bond);
+	switch_core_event_hook_add_state_change(session, tmp_hanguphook);
+
 
 	if (switch_ivr_originate(session, &peer_session, &cause, data, 0, NULL, NULL, NULL, NULL, NULL, SOF_NONE, NULL)
 		!= SWITCH_STATUS_SUCCESS || !peer_session) {
@@ -2226,6 +2278,9 @@ SWITCH_STANDARD_APP(att_xfer_function)
 	switch_core_session_rwunlock(peer_session);
 
   end:
+
+	switch_core_event_hook_remove_state_change(session, tmp_hanguphook);
+
 	switch_channel_set_variable(channel, SWITCH_SOFT_HOLDING_UUID_VARIABLE, NULL);
 	switch_channel_clear_flag(channel, CF_XFER_ZOMBIE);
 }
@@ -3510,7 +3565,7 @@ static switch_call_cause_t pickup_outgoing_channel(switch_core_session_t *sessio
 
 	tech_pvt = switch_core_session_alloc(nsession, sizeof(*tech_pvt));
 	tech_pvt->key = switch_core_session_strdup(nsession, pickup);
-	switch_event_dup(&tech_pvt->vars, var_event);
+
 
 	switch_core_session_set_private(nsession, tech_pvt);
 	
@@ -3534,7 +3589,9 @@ static switch_call_cause_t pickup_outgoing_channel(switch_core_session_t *sessio
 	pickup_add_session(nsession, pickup);
 	switch_channel_set_flag(nchannel, CF_PICKUP);
 	switch_channel_set_flag(nchannel, CF_NO_PRESENCE);
-	
+
+	switch_event_dup(&tech_pvt->vars, var_event);
+
 	goto done;
 
   error:
@@ -4103,7 +4160,7 @@ static switch_status_t api_chat_send(switch_event_t *message_event)
 		switch_api_execute(cmd, arg, NULL, &stream);
 
 		if (proto) {
-			switch_core_chat_send_args(proto, "api", to, hint && strchr(hint, '/') ? hint : from, !zstr(type) ? type : NULL, (char *) stream.data, NULL, NULL);
+			switch_core_chat_send_args(proto, "api", to, hint && strchr(hint, '/') ? hint : from, !zstr(type) ? type : NULL, (char *) stream.data, NULL, NULL, SWITCH_TRUE);
 		}
 
 		switch_safe_free(stream.data);
@@ -4640,6 +4697,9 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_dptools_load)
 	SWITCH_ADD_APP(app_interface, "bridge_export", "Export a channel variable across a bridge", EXPORT_LONG_DESC, bridge_export_function, "<varname>=<value>",
 				   SAF_SUPPORT_NOMEDIA | SAF_ROUTING_EXEC | SAF_ZOMBIE_EXEC);
 	SWITCH_ADD_APP(app_interface, "set", "Set a channel variable", SET_LONG_DESC, set_function, "<varname>=<value>",
+				   SAF_SUPPORT_NOMEDIA | SAF_ROUTING_EXEC | SAF_ZOMBIE_EXEC);
+
+	SWITCH_ADD_APP(app_interface, "multiset", "Set many channel variables", SET_LONG_DESC, multiset_function, "[^^<delim>]<varname>=<value> <var2>=<val2>",
 				   SAF_SUPPORT_NOMEDIA | SAF_ROUTING_EXEC | SAF_ZOMBIE_EXEC);
 
 	SWITCH_ADD_APP(app_interface, "push", "Set a channel variable", SET_LONG_DESC, push_function, "<varname>=<value>",

@@ -128,7 +128,11 @@ switch_status_t sofia_presence_chat_send(switch_event_t *message_event)
 	char *route_uri = NULL;
 	const char *network_ip = NULL, *network_port = NULL, *from_proto;
 	char *extra_headers = NULL;
-	
+	char uuid_str[SWITCH_UUID_FORMATTED_LENGTH + 1];
+	int mstatus = 0, sanity = 0;
+	const char *blocking;
+	int is_blocking = 0;
+
 	proto = switch_event_get_header(message_event, "proto");
 	from_proto = switch_event_get_header(message_event, "from_proto");
 	from = switch_event_get_header(message_event, "from");
@@ -137,7 +141,9 @@ switch_status_t sofia_presence_chat_send(switch_event_t *message_event)
 	body = switch_event_get_body(message_event);
 	type = switch_event_get_header(message_event, "type");
 	from_full = switch_event_get_header(message_event, "from_full");
-	
+	blocking = switch_event_get_header(message_event, "blocking");
+	is_blocking = switch_true(blocking);
+
 	network_ip = switch_event_get_header(message_event, "to_sip_ip");
 	network_port = switch_event_get_header(message_event, "to_sip_port");
 
@@ -324,6 +330,14 @@ switch_status_t sofia_presence_chat_send(switch_event_t *message_event)
 		
 		switch_snprintf(header, sizeof(header), "X-FS-Sending-Message: %s", switch_core_get_uuid());
 
+		switch_uuid_str(uuid_str, sizeof(uuid_str));
+		
+		if (is_blocking) {
+			switch_mutex_lock(profile->flag_mutex);
+			switch_core_hash_insert(profile->chat_hash, uuid_str, &mstatus);
+			switch_mutex_unlock(profile->flag_mutex);
+		}
+		
 		nua_message(msg_nh,
 					TAG_IF(dst->route_uri, NUTAG_PROXY(dst->route_uri)),
 					TAG_IF(route_uri, NUTAG_PROXY(route_uri)),
@@ -331,13 +345,30 @@ switch_status_t sofia_presence_chat_send(switch_event_t *message_event)
 					SIPTAG_FROM_STR(from),
 					TAG_IF(contact, NUTAG_URL(contact)),
 					SIPTAG_TO_STR(dup_dest),
-
+					SIPTAG_CALL_ID_STR(uuid_str),
 					TAG_IF(user_via, SIPTAG_VIA_STR(user_via)),
 					SIPTAG_CONTENT_TYPE_STR(ct),
 					SIPTAG_PAYLOAD_STR(body),
 					SIPTAG_HEADER_STR(header),
 					TAG_IF(!zstr(extra_headers), SIPTAG_HEADER_STR(extra_headers)),
 					TAG_END());
+		
+
+		if (is_blocking) {
+			sanity = 200;
+
+			while(!mstatus && --sanity && !msg_nh->nh_destroyed) {
+				switch_yield(100000);
+			}
+			
+			if (!(mstatus > 199 && mstatus < 300)) {
+				status = SWITCH_STATUS_FALSE;
+			}
+		
+			switch_mutex_lock(profile->flag_mutex);
+			switch_core_hash_delete(profile->chat_hash, uuid_str);
+			switch_mutex_unlock(profile->flag_mutex);
+		}
 
 		sofia_glue_free_destination(dst);
 		switch_safe_free(dup_dest);
@@ -869,8 +900,20 @@ static void send_conference_data(sofia_profile_t *profile, switch_event_t *event
 	const char *call_id = switch_event_get_header(event, "call_id");
 	const char *from_user = switch_event_get_header(event, "conference-name");
 	const char *from_host = switch_event_get_header(event, "conference-domain");
+	const char *event_str = switch_event_get_header(event, "conference-event");
 	const char *notfound = switch_event_get_header(event, "notfound");
 	const char *body = switch_event_get_body(event);
+	const char *type = "application/conference-info+xml";
+	const char *final = switch_event_get_header(event, "final");
+							
+	if (!event_str) {
+		event_str = "conference";
+	}
+
+	if (!strcasecmp(event_str, "refer")) {
+		type = "message/sipfrag";
+	}
+
 
 	if (!(from_user && from_host)) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Event information not given\n");
@@ -879,37 +922,47 @@ static void send_conference_data(sofia_profile_t *profile, switch_event_t *event
 
 	if (switch_true(notfound)) {
 		sql = switch_mprintf("update sip_subscriptions set expires=%ld where "
-							 "hostname='%q' and profile_name='%q' and sub_to_user='%q' and sub_to_host='%q' and event='conference'",
+							 "hostname='%q' and profile_name='%q' and sub_to_user='%q' and sub_to_host='%q' and event='%q'",
 							 (long)switch_epoch_time_now(NULL),
 							 mod_sofia_globals.hostname, profile->name,
-							 from_user, from_host);
+							 from_user, from_host, event_str);
 
 		sofia_glue_execute_sql_now(profile, &sql, SWITCH_TRUE);
 	}
 
-
 	if (call_id) {
 		sql = switch_mprintf("select full_to, full_from, contact %q ';_;isfocus', expires, call_id, event, network_ip, network_port, "
-							 "'application/conference-info+xml' as ct,'%q' as pt "
+							 "'%q' as ct,'%q' as pt "
 							 " from sip_subscriptions where "
-							 "hostname='%q' and profile_name='%q' and sub_to_user='%q' and sub_to_host='%q' and event='conference'"
+							 "hostname='%q' and profile_name='%q' and sub_to_user='%q' and sub_to_host='%q' and event='%q'"
 							 "and call_id = '%q' ", 
 							 switch_sql_concat(),
+							 type,
 							 switch_str_nil(body),
 							 mod_sofia_globals.hostname, profile->name,
-							 from_user, from_host, call_id);
+							 from_user, from_host, event_str, call_id);
 	} else {
 		sql = switch_mprintf("select full_to, full_from, contact %q ';_;isfocus', expires, call_id, event, network_ip, network_port, "
-							 "'application/conference-info+xml' as ct,'%q' as pt "
+							 "'%q' as ct,'%q' as pt "
 							 " from sip_subscriptions where "
-							 "hostname='%q' and profile_name='%q' and sub_to_user='%q' and sub_to_host='%q' and event='conference'",
+							 "hostname='%q' and profile_name='%q' and sub_to_user='%q' and sub_to_host='%q' and event='%q'",
 							 switch_sql_concat(),
+							 type,
 							 switch_str_nil(body),
 							 mod_sofia_globals.hostname, profile->name,
-							 from_user, from_host);
+							 from_user, from_host, event_str);
 	}
 
 	sofia_glue_execute_sql_callback(profile, profile->ireg_mutex, sql, sofia_presence_send_sql, &cb);
+
+	if (switch_true(final)) {
+		sql = switch_mprintf("delete from sip_subscriptions where "
+							 "hostname='%q' and profile_name='%q' and sub_to_user='%q' and sub_to_host='%q' and event='%q'",
+							 mod_sofia_globals.hostname, profile->name,
+							 from_user, from_host, event_str);
+
+		sofia_glue_execute_sql_now(profile, &sql, SWITCH_TRUE);
+	}
 	switch_safe_free(sql);
 
 }
@@ -2312,6 +2365,10 @@ static char *gen_pidf(char *user_agent, char *id, char *url, char *open, char *r
 			prpid = "onthephone";
 		}
 
+		if (zstr(open)) {
+			open = "open";
+		}
+
 		ret = switch_mprintf("<?xml version=\"1.0\"?>\n"
 							 "<!DOCTYPE presence PUBLIC \"-//IETF//DTD RFCxxxx XPIDF 1.0//EN\" \"xpidf.dtd\">\n"
 							 "<presence>\n"
@@ -2846,7 +2903,11 @@ static int sofia_presence_sub_callback(void *pArg, int argc, char **argv, char *
 						if (!zstr(op)) {
 							//switch_snprintf(status_line, sizeof(status_line), "%sing", what);
 							//} else {
-							switch_snprintf(status_line, sizeof(status_line), "%s %s", what, op);
+							if (sofia_test_pflag(profile, PFLAG_PRESENCE_PRIVACY)) {
+								switch_snprintf(status_line, sizeof(status_line), "%s", what);
+							} else {
+								switch_snprintf(status_line, sizeof(status_line), "%s %s", what, op);
+							}
 						}
 
 						rpid = "on-the-phone";
@@ -2875,7 +2936,11 @@ static int sofia_presence_sub_callback(void *pArg, int argc, char **argv, char *
 					if (!term && !strcmp(status, "hold")) {
 						rpid = "on-the-phone";
 						if (!zstr(op)) {
-							switch_snprintf(status_line, sizeof(status_line), "Hold %s", op);
+							if (sofia_test_pflag(profile, PFLAG_PRESENCE_PRIVACY)) {
+								switch_snprintf(status_line, sizeof(status_line), "Hold");
+							} else {
+								switch_snprintf(status_line, sizeof(status_line), "Hold %s", op);
+							}
 							force_status = 1;
 						}
 					}
@@ -2884,7 +2949,7 @@ static int sofia_presence_sub_callback(void *pArg, int argc, char **argv, char *
 				open = "closed";
 			}
 
-			if (open_closed) {
+			if (!zstr(open_closed)) {
 				open = open_closed;
 			}
 			
@@ -2916,7 +2981,7 @@ static int sofia_presence_sub_callback(void *pArg, int argc, char **argv, char *
 			open = "closed";
 		}
 
-		if (open_closed) {
+		if (!zstr(open_closed)) {
 			open = open_closed;
 		}
 
@@ -3732,7 +3797,7 @@ void sofia_presence_handle_sip_i_subscribe(int status,
 
 				now = switch_epoch_time_now(NULL);
 				sql = switch_mprintf("insert into sip_dialogs (sip_from_user,sip_from_host,call_info,call_info_state,hostname,expires,rcd,profile_name) "
-									 "values ('%q','%q','%q','seized','%q',%ld,%ld,'%q')",
+									 "values ('%q','%q','%q','seized','%q',%"SWITCH_TIME_T_FMT",%ld,'%q')",
 									 to_user, to_host, switch_str_nil(p), mod_sofia_globals.hostname, 
 									 switch_epoch_time_now(NULL) + exp_delta, (long)now, profile->name);
 
@@ -3979,10 +4044,10 @@ void sofia_presence_handle_sip_r_subscribe(int status,
 		gw_sub_ptr->state = SUB_STATE_FAILED;
 
 		if (sofia_private) {
-			if (sofia_private->gateway->sub_nh) {
-				nua_handle_bind(sofia_private->gateway->sub_nh, NULL);
-				nua_handle_destroy(sofia_private->gateway->sub_nh);
-				sofia_private->gateway->sub_nh = NULL;
+			if (gw_sub_ptr->nh) {
+				nua_handle_bind(gw_sub_ptr->nh, NULL);
+				nua_handle_destroy(gw_sub_ptr->nh);
+				gw_sub_ptr->nh = NULL;
 			}
 		} else {
 			nua_handle_destroy(nh);

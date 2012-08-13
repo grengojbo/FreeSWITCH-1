@@ -374,6 +374,11 @@ switch_status_t sofia_on_destroy(switch_core_session_t *session)
 	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "%s SOFIA DESTROY\n", switch_channel_get_name(channel));
 
 	if (tech_pvt) {
+		
+		if (tech_pvt->respond_phrase) {
+			switch_yield(100000);
+		}
+
 		if (switch_core_codec_ready(&tech_pvt->read_codec)) {
 			switch_core_codec_destroy(&tech_pvt->read_codec);
 		}
@@ -540,7 +545,8 @@ switch_status_t sofia_on_hangup(switch_core_session_t *session)
 
 
 				if (tech_pvt->respond_phrase) {
-					phrase = su_strdup(nua_handle_home(tech_pvt->nh), tech_pvt->respond_phrase);
+					//phrase = su_strdup(nua_handle_home(tech_pvt->nh), tech_pvt->respond_phrase);
+					phrase = tech_pvt->respond_phrase;
 				} else {
 					phrase = sip_status_phrase(sip_cause);
 				}
@@ -2321,19 +2327,6 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 
 		if (!zstr(msg->string_arg)) {
 
-			int status = 0;
-
-			if (tech_pvt->nh && tech_pvt->nh->nh_ds && tech_pvt->nh->nh_ds->ds_sr && nua_server_request_is_pending(tech_pvt->nh->nh_ds->ds_sr)) {
-				status = tech_pvt->nh->nh_ds->ds_sr->sr_status;
-			}
-
-			if (status == 0 || status > 199 || tech_pvt->nh->nh_destroyed) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "%s Cannot call respond on handle at status %d\n", 
-								  switch_channel_get_name(channel), status);
-				goto end_lock;
-			}
-
-
 			if (!switch_channel_test_flag(channel, CF_ANSWERED) && !sofia_test_flag(tech_pvt, TFLAG_BYE)) {
 				char *dest = (char *) msg->string_arg;
 				char *argv[128] = { 0 };
@@ -2405,29 +2398,19 @@ static switch_status_t sofia_receive_message(switch_core_session_t *session, swi
 			}
 			nua_refer(tech_pvt->nh, SIPTAG_REFER_TO_STR(ref_to), SIPTAG_REFERRED_BY_STR(tech_pvt->contact_url), TAG_END());
 			switch_mutex_unlock(tech_pvt->sofia_mutex);
-			sofia_wait_for_reply(tech_pvt, 9999, 300);
+			sofia_wait_for_reply(tech_pvt, 9999, 10);
 			switch_mutex_lock(tech_pvt->sofia_mutex);
 			if ((var = switch_channel_get_variable(tech_pvt->channel, "sip_refer_reply"))) {
 				msg->string_reply = switch_core_session_strdup(session, var);
 			} else {
 				msg->string_reply = "no reply";
 			}
+			switch_channel_hangup(tech_pvt->channel, SWITCH_CAUSE_BLIND_TRANSFER);
 		}
 		break;
 
 	case SWITCH_MESSAGE_INDICATE_RESPOND:
 		{
-			int status = 0;
-
-			if (tech_pvt->nh && tech_pvt->nh->nh_ds && tech_pvt->nh->nh_ds->ds_sr && nua_server_request_is_pending(tech_pvt->nh->nh_ds->ds_sr)) {
-				status = tech_pvt->nh->nh_ds->ds_sr->sr_status;
-			}
-
-			if (status == 0 || status > 199 || tech_pvt->nh->nh_destroyed) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "%s Cannot call respond on handle at status %d\n", 
-								  switch_channel_get_name(channel), status);
-				goto end_lock;
-			}
 
 			if (msg->numeric_arg || msg->string_arg) {
 				int code = msg->numeric_arg;
@@ -2803,6 +2786,7 @@ struct cb_helper {
 	uint32_t row_process;
 	sofia_profile_t *profile;
 	switch_stream_handle_t *stream;
+	switch_bool_t dedup;
 };
 
 
@@ -3795,11 +3779,22 @@ static int contact_callback(void *pArg, int argc, char **argv, char **columnName
 {
 	struct cb_helper *cb = (struct cb_helper *) pArg;
 	char *contact;
-
+	
 	cb->row_process++;
-
+	
 	if (!zstr(argv[0]) && (contact = sofia_glue_get_url_from_contact(argv[0], 1))) {
-		cb->stream->write_function(cb->stream, "%ssofia/%s/sip:%s,", argv[2], argv[1], sofia_glue_strip_proto(contact));
+		if (cb->dedup) {
+			char *tmp = switch_mprintf("%ssofia/%s/sip:%s", argv[2], argv[1], sofia_glue_strip_proto(contact));
+			
+			if (!strstr((char *)cb->stream->data, tmp)) {
+				cb->stream->write_function(cb->stream, "%s,", tmp);
+			}
+
+			free(tmp);
+
+		} else {
+			cb->stream->write_function(cb->stream, "%ssofia/%s/sip:%s,", argv[2], argv[1], sofia_glue_strip_proto(contact));
+		}
 		free(contact);
 	}
 
@@ -4002,7 +3997,8 @@ static void select_from_profile(sofia_profile_t *profile,
 								const char *domain,
 								const char *concat,
 								const char *exclude_contact, 
-								switch_stream_handle_t *stream)
+								switch_stream_handle_t *stream,
+								switch_bool_t dedup)
 {
 	struct cb_helper cb;
 	char *sql;
@@ -4011,15 +4007,16 @@ static void select_from_profile(sofia_profile_t *profile,
 
 	cb.profile = profile;
 	cb.stream = stream;
+	cb.dedup = dedup;
 
 	if (exclude_contact) {
 		sql = switch_mprintf("select contact, profile_name, '%q' "
-							 "from sip_registrations where sip_user='%q' and (sip_host='%q' or presence_hosts like '%%%q%%') "
-							 "and contact not like '%%%s%%'", (concat != NULL) ? concat : "", user, domain, domain, exclude_contact);
+							 "from sip_registrations where profile_name='%q' and sip_user='%q' and (sip_host='%q' or presence_hosts like '%%%q%%') "
+							 "and contact not like '%%%s%%'", (concat != NULL) ? concat : "", profile->name, user, domain, domain, exclude_contact);
 	} else {
 		sql = switch_mprintf("select contact, profile_name, '%q' "
-							 "from sip_registrations where sip_user='%q' and (sip_host='%q' or presence_hosts like '%%%q%%')",
-							 (concat != NULL) ? concat : "", user, domain, domain);
+							 "from sip_registrations where profile_name='%q' and sip_user='%q' and (sip_host='%q' or presence_hosts like '%%%q%%')",
+							 (concat != NULL) ? concat : "", profile->name, user, domain, domain);
 	}
 
 	switch_assert(sql);
@@ -4104,7 +4101,7 @@ SWITCH_STANDARD_API(sofia_contact_function)
 			domain = profile->domain_name;
 		}
 			
-		select_from_profile(profile, user, domain, concat, exclude_contact, &mystream);
+		select_from_profile(profile, user, domain, concat, exclude_contact, &mystream, SWITCH_FALSE);
 		sofia_glue_release_profile(profile);
 	
 	} else if (!zstr(domain)) {
@@ -4117,7 +4114,7 @@ SWITCH_STANDARD_API(sofia_contact_function)
 			for (hi = switch_hash_first(NULL, mod_sofia_globals.profile_hash); hi; hi = switch_hash_next(hi)) {
 				switch_hash_this(hi, &var, NULL, &val);
 				if ((profile = (sofia_profile_t *) val) && !strcmp((char *)var, profile->name)) {
-					select_from_profile(profile, user, domain, concat, exclude_contact, &mystream);			
+					select_from_profile(profile, user, domain, concat, exclude_contact, &mystream, SWITCH_TRUE);			
 					profile = NULL;
 				}
 			}
@@ -4578,9 +4575,10 @@ static switch_call_cause_t sofia_outgoing_channel(switch_core_session_t *session
 				dest_to = NULL;
 			}
 		}
-
+		
 		if (params) {
 			tech_pvt->invite_contact = switch_core_session_sprintf(nsession, "%s;%s", gateway_ptr->register_contact, params);
+			tech_pvt->dest = switch_core_session_sprintf(nsession, "%s;%s", tech_pvt->dest, params);
 		} else {
 			tech_pvt->invite_contact = switch_core_session_strdup(nsession, gateway_ptr->register_contact);
 		}
@@ -5706,6 +5704,8 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_sofia_load)
 	SWITCH_ADD_API(api_interface, "sofia_count_reg", "Count Sofia registration", sofia_count_reg_function, "[profile/]<user>@<domain>");
 	SWITCH_ADD_API(api_interface, "sofia_dig", "SIP DIG", sip_dig_function, "<url>");
 	SWITCH_ADD_CHAT(chat_interface, SOFIA_CHAT_PROTO, sofia_presence_chat_send);
+
+	crtp_init(*module_interface);
 
 	/* indicate that the module should continue to be loaded */
 	return SWITCH_STATUS_SUCCESS;

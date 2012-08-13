@@ -2548,7 +2548,10 @@ static void voicemail_check_main(switch_core_session_t *session, vm_profile_t *p
 		if (authed) {
 			switch_channel_set_variable(channel, "user_pin_authenticated", "true");
 			switch_channel_set_variable(channel, "user_pin_authenticated_user", myid);
-			if (!zstr(myid)) switch_ivr_set_user(session, myid);
+			if (!zstr(myid) && !zstr(domain_name)) {
+				char *account = switch_core_session_sprintf(session, "%s@%s", myid, domain_name);
+				switch_ivr_set_user(session, account);
+			}
 		} else {
 			switch_channel_hangup(channel, SWITCH_CAUSE_USER_CHALLENGE);
 		}
@@ -3535,11 +3538,11 @@ SWITCH_STANDARD_APP(voicemail_function)
 		if (argv[x] && !strcasecmp(argv[x], "check")) {
 			check++;
 			x++;
-		} else if (argv[x] && !strcasecmp(argv[x], "auth")) {
-			auth++;
-			x++;
 		} else if (argv[x] && !strcasecmp(argv[x], "auth_only")) {
 			auth = 2;
+			x++;
+		} else if (argv[x] && !strcasecmp(argv[x], "auth")) {
+			auth++;
 			x++;
 		} else {
 			break;
@@ -3584,7 +3587,7 @@ SWITCH_STANDARD_APP(voicemail_function)
 		return;
 	}
 
-	if (check) {
+	if (check || auth == 2) {
 		if (argv[x]) {
 			uuid = argv[x++];
 		}
@@ -3805,6 +3808,9 @@ static void actual_message_query_handler(switch_event_t *event)
 			if (globals.message_query_exact_match) {
 				if ((profile = (vm_profile_t *) switch_core_hash_find(globals.profile_hash, domain))) {
 					parse_profile();
+				} else {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, 
+									  "Cound not find a profile for domain: [%s] Returning 0 messages\nWhen message-query-exact-match is enabled you must have a dedicated vm profile per distinct domain name you wish to use.\n", domain);
 				}
 			} else {
 				for (hi = switch_hash_first(NULL, globals.profile_hash); hi; hi = switch_hash_next(hi)) {

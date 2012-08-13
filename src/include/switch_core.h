@@ -323,6 +323,9 @@ SWITCH_DECLARE(switch_status_t) switch_core_port_allocator_free_port(_In_ switch
 SWITCH_DECLARE(void) switch_core_port_allocator_destroy(_Inout_ switch_core_port_allocator_t **alloc);
 ///\}
 
+
+SWITCH_DECLARE(int) switch_core_test_flag(int flag);
+
 ///\defgroup ss Startup/Shutdown
 ///\ingroup core1
 ///\{
@@ -1648,6 +1651,15 @@ SWITCH_DECLARE(switch_status_t) switch_core_file_read(_In_ switch_file_handle_t 
 SWITCH_DECLARE(switch_status_t) switch_core_file_write(_In_ switch_file_handle_t *fh, void *data, switch_size_t *len);
 
 /*! 
+  \brief Write media to a file handle
+  \param fh the file handle to write to
+  \param data the buffer to write
+  \param len the amount of data to write from the buffer
+  \return SWITCH_STATUS_SUCCESS with len adjusted to the bytes written if successful
+*/
+SWITCH_DECLARE(switch_status_t) switch_core_file_write_video(_In_ switch_file_handle_t *fh, void *data, switch_size_t *len);
+
+/*!
   \brief Seek a position in a file
   \param fh the file handle to seek
   \param cur_pos the current position in the file
@@ -2144,7 +2156,7 @@ SWITCH_DECLARE(int) switch_stream_system(const char *cmd, switch_stream_handle_t
 SWITCH_DECLARE(void) switch_cond_yield(switch_interval_time_t t);
 SWITCH_DECLARE(void) switch_cond_next(void);
 SWITCH_DECLARE(switch_status_t) switch_core_chat_send_args(const char *dest_proto, const char *proto, const char *from, const char *to,
-														   const char *subject, const char *body, const char *type, const char *hint);
+														   const char *subject, const char *body, const char *type, const char *hint, switch_bool_t blocking);
 SWITCH_DECLARE(switch_status_t) switch_core_chat_send(const char *dest_proto, switch_event_t *message_event);
 SWITCH_DECLARE(switch_status_t) switch_core_chat_deliver(const char *dest_proto, switch_event_t **message_event);
 

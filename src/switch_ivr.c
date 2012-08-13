@@ -553,7 +553,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_parse_event(switch_core_session_t *se
 
 			switch_channel_clear_flag(channel, CF_STOP_BROADCAST);
 
-			if (switch_channel_test_flag(channel, CF_BROADCAST)) {
+			if (!switch_channel_test_flag(channel, CF_BRIDGED) || switch_channel_test_flag(channel, CF_BROADCAST)) {
 				inner++;
 				hold_bleg = NULL;
 			} else {
@@ -1690,6 +1690,9 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_session_transfer(switch_core_session_
 
 		switch_channel_set_variable(channel, SWITCH_SIGNAL_BOND_VARIABLE, NULL);
 
+		/* Set CF_TRANSFER flag before hanging up bleg to avoid race condition */
+		switch_channel_set_flag(channel, CF_TRANSFER);
+
 		/* If HANGUP_AFTER_BRIDGE is set to 'true', SWITCH_SIGNAL_BRIDGE_VARIABLE 
 		 * will not have a value, so we need to check SWITCH_BRIDGE_VARIABLE */
 
@@ -1725,8 +1728,7 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_session_transfer(switch_core_session_
 		}
 
 		switch_channel_set_caller_profile(channel, new_profile);
-		switch_channel_set_flag(channel, CF_TRANSFER);
-		
+
 		switch_channel_set_state(channel, CS_ROUTING);
 
 		msg.message_id = SWITCH_MESSAGE_INDICATE_TRANSFER;
@@ -2195,6 +2197,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_generate_xml_cdr(switch_core_session_
 			return SWITCH_STATUS_SUCCESS;
 		}
 	}
+
+	switch_xml_set_attr_d(cdr, "core-uuid", switch_core_get_uuid());
 
 	if (!(x_channel_data = switch_xml_add_child_d(cdr, "channel_data", cdr_off++))) {
 		goto error;

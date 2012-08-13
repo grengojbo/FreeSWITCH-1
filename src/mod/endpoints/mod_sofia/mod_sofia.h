@@ -279,7 +279,8 @@ typedef enum {
 	PFLAG_NDLB_BROKEN_AUTH_HASH = (1 << 1),
 	PFLAG_NDLB_SENDRECV_IN_SESSION = (1 << 2),
 	PFLAG_NDLB_ALLOW_BAD_IANANAME = (1 << 3),
-	PFLAG_NDLB_ALLOW_NONDUP_SDP = (1 << 4)
+	PFLAG_NDLB_ALLOW_NONDUP_SDP = (1 << 4),
+	PFLAG_NDLB_ALLOW_CRYPTO_IN_AVP = (1 << 5)
 } sofia_NDLB_t;
 
 typedef enum {
@@ -438,9 +439,11 @@ typedef enum {
 
 struct sofia_gateway_subscription {
 	sofia_gateway_t *gateway;
+	nua_handle_t *nh;
 	char *expires_str;
 	char *event;				/* eg, 'message-summary' to subscribe to MWI events */
 	char *content_type;			/* eg, application/simple-message-summary in the case of MWI events */
+	char *request_uri;
 	uint32_t freq;
 	int32_t retry_seconds;
 	time_t expires;
@@ -452,7 +455,6 @@ struct sofia_gateway_subscription {
 struct sofia_gateway {
 	sofia_private_t *sofia_private;
 	nua_handle_t *nh;
-	nua_handle_t *sub_nh;
 	sofia_profile_t *profile;
 	char *name;
 	char *register_scheme;
@@ -491,7 +493,6 @@ struct sofia_gateway {
 	int32_t retry_seconds;
 	int32_t reg_timeout_seconds;
 	int32_t failure_status;
-	sub_state_t sub_state;
 	reg_state_t state;
 	switch_memory_pool_t *pool;
 	int deleted;
@@ -1189,6 +1190,7 @@ void sofia_process_dispatch_event(sofia_dispatch_event_t **dep);
 char *sofia_glue_get_host(const char *str, switch_memory_pool_t *pool);
 void sofia_presence_check_subscriptions(sofia_profile_t *profile, time_t now);
 void sofia_msg_thread_start(int idx);
+void crtp_init(switch_loadable_module_interface_t *module_interface);
 
 
 /* For Emacs:

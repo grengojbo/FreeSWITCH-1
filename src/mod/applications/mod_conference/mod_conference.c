@@ -173,7 +173,8 @@ typedef enum {
 	MFLAG_INDICATE_UNMUTE = (1 << 18),
 	MFLAG_NOMOH = (1 << 19),
 	MFLAG_VIDEO_BRIDGE = (1 << 20),
-	MFLAG_INDICATE_MUTE_DETECT = (1 << 21)
+	MFLAG_INDICATE_MUTE_DETECT = (1 << 21),
+	MFLAG_PAUSE_RECORDING = (1 << 22)
 } member_flag_t;
 
 typedef enum {
@@ -251,6 +252,12 @@ typedef struct conference_file_node {
 	struct conference_file_node *next;
 	char *file;
 } conference_file_node_t;
+
+typedef enum {
+	REC_ACTION_STOP = 1,
+	REC_ACTION_PAUSE,
+	REC_ACTION_RESUME
+} recording_action_type_t;
 
 /* conference xml config sections */
 typedef struct conf_xml_cfg {
@@ -516,6 +523,8 @@ static switch_status_t conf_api_sub_deaf(conference_member_t *member, switch_str
 static switch_status_t conf_api_sub_undeaf(conference_member_t *member, switch_stream_handle_t *stream, void *data);
 static switch_status_t conference_add_event_data(conference_obj_t *conference, switch_event_t *event);
 static switch_status_t conference_add_event_member_data(conference_member_t *member, switch_event_t *event);
+static switch_status_t conf_api_sub_floor(conference_member_t *member, switch_stream_handle_t *stream, void *data);
+static switch_status_t conf_api_sub_enforce_floor(conference_member_t *member, switch_stream_handle_t *stream, void *data);
 
 
 #define lock_member(_member) switch_mutex_lock(_member->write_mutex); switch_mutex_lock(_member->read_mutex)
@@ -662,9 +671,11 @@ static char *conference_rfc4579_render(conference_obj_t *conference, switch_even
 	switch_snprintf(tmp, sizeof(tmp), "%u", conference->count);
 	switch_xml_set_txt_d(x_tag1, tmpp);	
 
+#if 0
 	if (conference->count == 0) {
 		switch_event_add_header(revent, SWITCH_STACK_BOTTOM, "notfound", "true");
 	}
+#endif
 
 	if (!(x_tag1 = switch_xml_add_child_d(x_tag, "active", off1++))) {
 		abort();
@@ -1184,6 +1195,40 @@ static switch_status_t conference_record_stop(conference_obj_t *conference, char
 	switch_mutex_unlock(conference->member_mutex);
 	return count;
 }
+/* stop/pause/resume the specified recording */
+static switch_status_t conference_record_action(conference_obj_t *conference, char *path, recording_action_type_t action)
+{
+	conference_member_t *member = NULL;
+	int count = 0;
+	//switch_file_handle_t *fh = NULL;
+
+	switch_assert(conference != NULL);
+	switch_mutex_lock(conference->member_mutex);
+	for (member = conference->members; member; member = member->next)
+	{
+		if (switch_test_flag(member, MFLAG_NOCHANNEL) && (!path || !strcmp(path, member->rec_path)))
+		{
+			//switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,	"Action: %d\n", action);
+			switch (action)
+			{
+				case REC_ACTION_STOP:
+						switch_clear_flag_locked(member, MFLAG_RUNNING);
+						count++;
+						break;
+				case REC_ACTION_PAUSE:
+						switch_set_flag_locked(member, MFLAG_PAUSE_RECORDING);
+						count = 1;
+						break;
+				case REC_ACTION_RESUME:
+						switch_clear_flag_locked(member, MFLAG_PAUSE_RECORDING);
+						count = 1;
+						break;
+					}
+				}
+			}
+	switch_mutex_unlock(conference->member_mutex);
+	return count;
+}
 
 
 /* Add a custom relationship to a member */
@@ -1272,6 +1317,49 @@ static void send_rfc_event(conference_obj_t *conference)
 		body = conference_rfc4579_render(conference, NULL, event);
 		switch_event_add_body(event, "%s", body);
 		free(body);
+		switch_event_fire(&event);
+	}
+
+	switch_safe_free(dup_domain);
+
+}
+
+
+
+static void send_conference_notify(conference_obj_t *conference, const char *status, switch_bool_t final)
+{
+	switch_event_t *event;
+	char *name = NULL, *domain = NULL, *dup_domain = NULL;
+	
+	if (!switch_test_flag(conference, CFLAG_RFC4579)) {
+		return;
+	}
+
+	if (!(name = conference->name)) {
+		name = "conference";
+	}
+
+	if (!(domain = conference->domain)) {
+		dup_domain = switch_core_get_variable_dup("domain");
+		if (!(domain = dup_domain)) {
+			domain = "cluecon.com";
+		}
+	}
+
+
+	if (switch_event_create(&event, SWITCH_EVENT_CONFERENCE_DATA) == SWITCH_STATUS_SUCCESS) {
+		event->flags |= EF_UNIQ_HEADERS;
+
+		switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "conference-name", name);
+		switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "conference-domain", domain);
+		switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "conference-event", "refer");
+
+		if (final) {
+			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "final", "true");
+		}
+
+
+		switch_event_add_body(event, "%s", status);
 		switch_event_fire(&event);
 	}
 
@@ -2395,6 +2483,20 @@ static void *SWITCH_THREAD_FUNC conference_thread_run(switch_thread_t *thread, v
 	switch_mutex_unlock(globals.hash_mutex);
 
 	return NULL;
+}
+
+static void conference_loop_fn_floor_toggle(conference_member_t *member, caller_control_action_t *action)
+{
+	if (member == NULL) return;
+
+	conf_api_sub_floor(member, NULL, NULL);
+}
+
+static void conference_loop_fn_enforce_floor(conference_member_t *member, caller_control_action_t *action)
+{
+	if (member == NULL) return;
+
+	conf_api_sub_enforce_floor(member, NULL, NULL);
 }
 
 static void conference_loop_fn_mute_toggle(conference_member_t *member, caller_control_action_t *action)
@@ -3846,11 +3948,13 @@ static void *SWITCH_THREAD_FUNC conference_record_thread_run(switch_thread_t *th
 			len = (switch_size_t) samples;
 		}
 
-		if (!len || switch_core_file_write(&fh, data_buf, &len) != SWITCH_STATUS_SUCCESS) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Write Failed\n");
-			switch_clear_flag_locked(member, MFLAG_RUNNING);
+		if (!switch_test_flag(member, MFLAG_PAUSE_RECORDING)) {
+			if (!len || switch_core_file_write(&fh, data_buf, &len) != SWITCH_STATUS_SUCCESS) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Write Failed\n");
+				switch_clear_flag_locked(member, MFLAG_RUNNING);
+			}
 		}
-		
+
 	loop:
 
 		switch_core_timer_next(&timer);
@@ -4852,13 +4956,96 @@ static switch_status_t conf_api_sub_list(conference_obj_t *conference, switch_st
 	if (conference == NULL) {
 		switch_mutex_lock(globals.hash_mutex);
 		for (hi = switch_hash_first(NULL, globals.conference_hash); hi; hi = switch_hash_next(hi)) {
+			int fcount = 0;
 			switch_hash_this(hi, NULL, NULL, &val);
 			conference = (conference_obj_t *) val;
 
-			stream->write_function(stream, "Conference %s (%u member%s rate: %u%s)\n",
+			stream->write_function(stream, "Conference %s (%u member%s rate: %u%s flags: ",
 								   conference->name,
 								   conference->count,
 								   conference->count == 1 ? "" : "s", conference->rate, switch_test_flag(conference, CFLAG_LOCKED) ? " locked" : "");
+
+			if (switch_test_flag(conference, CFLAG_LOCKED)) {
+				stream->write_function(stream, "%slocked", fcount ? "|" : "");
+				fcount++;
+			}
+
+			if (switch_test_flag(conference, CFLAG_DESTRUCT)) {
+				stream->write_function(stream, "%sdestruct", fcount ? "|" : "");
+				fcount++;
+			}
+
+			if (switch_test_flag(conference, CFLAG_WAIT_MOD)) {
+				stream->write_function(stream, "%swait_mod", fcount ? "|" : "");
+				fcount++;
+			}
+
+			if (switch_test_flag(conference, CFLAG_AUDIO_ALWAYS)) {
+				stream->write_function(stream, "%saudio_always", fcount ? "|" : "");
+				fcount++;
+			}
+
+			if (switch_test_flag(conference, CFLAG_RUNNING)) {
+				stream->write_function(stream, "%srunning", fcount ? "|" : "");
+				fcount++;
+			}
+
+			if (switch_test_flag(conference, CFLAG_ANSWERED)) {
+				stream->write_function(stream, "%sanswered", fcount ? "|" : "");
+				fcount++;
+			}
+
+			if (switch_test_flag(conference, CFLAG_ENFORCE_MIN)) {
+				stream->write_function(stream, "%senforce_min", fcount ? "|" : "");
+				fcount++;
+			}
+
+			if (switch_test_flag(conference, CFLAG_BRIDGE_TO)) {
+				stream->write_function(stream, "%sbridge_to", fcount ? "|" : "");
+				fcount++;
+			}
+
+			if (switch_test_flag(conference, CFLAG_DYNAMIC)) {
+				stream->write_function(stream, "%sdynamic", fcount ? "|" : "");
+				fcount++;
+			}
+
+			if (switch_test_flag(conference, CFLAG_EXIT_SOUND)) {
+				stream->write_function(stream, "%sexit_sound", fcount ? "|" : "");
+				fcount++;
+			}
+
+			if (switch_test_flag(conference, CFLAG_ENTER_SOUND)) {
+				stream->write_function(stream, "%senter_sound", fcount ? "|" : "");
+				fcount++;
+			}
+
+			if (conference->record_count > 0) {
+				stream->write_function(stream, "%srecording", fcount ? "|" : "");
+				fcount++;
+			}
+
+			if (switch_test_flag(conference, CFLAG_VIDEO_BRIDGE)) {
+				stream->write_function(stream, "%svideo_bridge", fcount ? "|" : "");
+				fcount++;
+			}
+
+			if (switch_test_flag(conference, CFLAG_VID_FLOOR)) {
+				stream->write_function(stream, "%svideo_floor_only", fcount ? "|" : "");
+				fcount++;
+			}
+
+			if (switch_test_flag(conference, CFLAG_RFC4579)) {
+				stream->write_function(stream, "%svideo_rfc4579", fcount ? "|" : "");
+				fcount++;
+			}
+
+			if (!fcount) {
+				stream->write_function(stream, "none");
+			}
+
+			stream->write_function(stream, ")\n");
+
 			count++;
 			if (!summary) {
 				if (pretty) {
@@ -4889,6 +5076,97 @@ static switch_status_t conf_api_sub_list(conference_obj_t *conference, switch_st
 	return ret_status;
 }
 
+static switch_status_t conf_api_sub_floor(conference_member_t *member, switch_stream_handle_t *stream, void *data)
+{
+	switch_event_t *event;
+
+	if (member == NULL)
+		return SWITCH_STATUS_GENERR;
+
+	switch_mutex_lock(member->conference->mutex);
+
+	if (member->conference->floor_holder == member) {
+		member->conference->floor_holder = NULL;
+		if (test_eflag(member->conference, EFLAG_FLOOR_CHANGE)) {
+			switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, CONF_EVENT_MAINT);
+			conference_add_event_data(member->conference, event);
+			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Action", "floor-change");
+			switch_event_add_header(event, SWITCH_STACK_BOTTOM, "Old-ID", "%d", member->id);
+			switch_event_add_header(event, SWITCH_STACK_BOTTOM, "New-ID", "none");
+			switch_event_fire(&event);
+			if (stream != NULL) {
+				stream->write_function(stream, "OK floor none\n");
+			}
+		}
+	} else if (member->conference->floor_holder == NULL) {
+		member->conference->floor_holder = member;
+		if (test_eflag(member->conference, EFLAG_FLOOR_CHANGE)) {
+			switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, CONF_EVENT_MAINT);
+			conference_add_event_data(member->conference, event);
+			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Action", "floor-change");
+			switch_event_add_header(event, SWITCH_STACK_BOTTOM, "Old-ID", "none");
+			switch_event_add_header(event, SWITCH_STACK_BOTTOM, "New-ID", "%d", member->id);
+			switch_event_fire(&event);
+			if (stream != NULL) {
+				stream->write_function(stream, "OK floor %u\n", member->id);
+			}
+
+			if (switch_core_session_read_lock(member->session) == SWITCH_STATUS_SUCCESS) {
+				/* Tell the channel to request a fresh vid frame */
+				switch_channel_set_flag(switch_core_session_get_channel(member->session), CF_VIDEO_REFRESH_REQ);
+				switch_core_session_rwunlock(member->session);
+			}
+		}
+	} else {
+		if (stream != NULL) {
+			stream->write_function(stream, "ERR floor is held by %u\n", member->conference->floor_holder->id);
+		}
+	}
+
+	switch_mutex_unlock(member->conference->mutex);
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static switch_status_t conf_api_sub_enforce_floor(conference_member_t *member, switch_stream_handle_t *stream, void *data)
+{
+	switch_event_t *event;
+
+	if (member == NULL)
+		return SWITCH_STATUS_GENERR;
+
+	switch_mutex_lock(member->conference->mutex);
+
+	if (member->conference->floor_holder != member) {
+		conference_member_t *old_member = member->conference->floor_holder;
+		member->conference->floor_holder = member;
+		if (test_eflag(member->conference, EFLAG_FLOOR_CHANGE)) {
+			switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, CONF_EVENT_MAINT);
+			conference_add_event_data(member->conference, event);
+			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Action", "floor-change");
+			if (old_member == NULL) {
+				switch_event_add_header(event, SWITCH_STACK_BOTTOM, "Old-ID", "none");
+			} else {
+				switch_event_add_header(event, SWITCH_STACK_BOTTOM, "Old-ID", "%d", old_member->id);
+			}
+			switch_event_add_header(event, SWITCH_STACK_BOTTOM, "New-ID", "%d", member->id);
+			switch_event_fire(&event);
+			if (stream != NULL) {
+				stream->write_function(stream, "OK floor %u\n", member->id);
+			}
+		}
+
+		if (switch_core_session_read_lock(member->session) == SWITCH_STATUS_SUCCESS) {
+			/* Tell the channel to request a fresh vid frame */
+			switch_channel_set_flag(switch_core_session_get_channel(member->session), CF_VIDEO_REFRESH_REQ);
+			switch_core_session_rwunlock(member->session);
+		}
+	}
+
+	switch_mutex_unlock(member->conference->mutex);
+
+	return SWITCH_STATUS_SUCCESS;
+}
 
 static switch_xml_t add_x_tag(switch_xml_t x_member, const char *name, const char *value, int off)
 {
@@ -4978,6 +5256,18 @@ static void conference_xlist(conference_obj_t *conference, switch_xml_t x_confer
 		switch_xml_set_attr_d(x_conference, "endconf_grace_time", ival);
 	}
 
+	if (switch_test_flag(conference, CFLAG_VIDEO_BRIDGE)) {
+		switch_xml_set_attr_d(x_conference, "video_bridge", "true");
+	}
+
+	if (switch_test_flag(conference, CFLAG_VID_FLOOR)) {
+		switch_xml_set_attr_d(x_conference, "video_floor_only", "true");
+	}
+
+	if (switch_test_flag(conference, CFLAG_RFC4579)) {
+		switch_xml_set_attr_d(x_conference, "video_rfc4579", "true");
+	}
+
 	switch_snprintf(i, sizeof(i), "%d", switch_epoch_time_now(NULL) - conference->run_time);
 	switch_xml_set_attr_d(x_conference, "run_time", ival);
 
@@ -5012,6 +5302,9 @@ static void conference_xlist(conference_obj_t *conference, switch_xml_t x_confer
 				*/
 
 				x_tag = switch_xml_add_child_d(x_member, "record_path", count++);
+				if (switch_test_flag(member, MFLAG_PAUSE_RECORDING)) {
+					switch_xml_set_attr_d(x_tag, "status", "paused");
+				}
 				switch_xml_set_txt_d(x_tag, member->rec_path);
 
 				x_tag = switch_xml_add_child_d(x_member, "join_time", count++);
@@ -5072,6 +5365,9 @@ static void conference_xlist(conference_obj_t *conference, switch_xml_t x_confer
 
 		x_tag = switch_xml_add_child_d(x_flags, "has_video", count++);
 		switch_xml_set_txt_d(x_tag, switch_channel_test_flag(switch_core_session_get_channel(member->session), CF_VIDEO) ? "true" : "false");
+
+		x_tag = switch_xml_add_child_d(x_flags, "video_bridge", count++);
+		switch_xml_set_txt_d(x_tag, switch_test_flag(member, MFLAG_VIDEO_BRIDGE) ? "true" : "false");
 
 		x_tag = switch_xml_add_child_d(x_flags, "has_floor", count++);
 		switch_xml_set_txt_d(x_tag, (member == member->conference->floor_holder) ? "true" : "false");
@@ -5725,6 +6021,85 @@ static switch_status_t conf_api_sub_norecord(conference_obj_t *conference, switc
 	return SWITCH_STATUS_SUCCESS;
 }
 
+static switch_status_t conf_api_sub_pauserec(conference_obj_t *conference, switch_stream_handle_t *stream, int argc, char **argv)
+{
+	switch_event_t *event;
+	recording_action_type_t action;
+
+	switch_assert(conference != NULL);
+	switch_assert(stream != NULL);
+
+	if (argc <= 2)
+		return SWITCH_STATUS_GENERR;
+
+	if (strcasecmp(argv[1], "pause") == 0) {
+		action = REC_ACTION_PAUSE;
+	} else if (strcasecmp(argv[1], "resume") == 0) {
+		action = REC_ACTION_RESUME;
+	} else {
+		return SWITCH_STATUS_GENERR;
+	}
+	stream->write_function(stream, "%s recording file %s\n",
+			action == REC_ACTION_PAUSE ? "Pause" : "Resume", argv[2]);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,	"%s recording file %s\n",
+			action == REC_ACTION_PAUSE ? "Pause" : "Resume", argv[2]);
+
+	if (!conference_record_action(conference, argv[2], action)) {
+		stream->write_function(stream, "non-existant recording '%s'\n", argv[2]);
+	} else {
+		if (test_eflag(conference, EFLAG_RECORD) && switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, CONF_EVENT_MAINT) == SWITCH_STATUS_SUCCESS)
+		{
+			conference_add_event_data(conference, event);
+			if (action == REC_ACTION_PAUSE) {
+				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Action", "pause-recording");
+			} else {
+				switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Action", "resume-recording");
+			}
+			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Path", argv[2]);
+			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Other-Recordings", conference->record_count ? "true" : "false");
+			switch_event_fire(&event);
+		}
+	}
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static switch_status_t conf_api_sub_recording(conference_obj_t *conference, switch_stream_handle_t *stream, int argc, char **argv)
+{
+	switch_assert(conference != NULL);
+	switch_assert(stream != NULL);
+
+	if (argc <= 3) {
+		/* It means that old syntax is used */
+		return conf_api_sub_record(conference,stream,argc,argv);
+	} else {
+		/* for new syntax call existing functions with fixed parameter list */
+		if (strcasecmp(argv[2], "start") == 0) {
+			argv[1] = argv[2];
+			argv[2] = argv[3];
+			return conf_api_sub_record(conference,stream,4,argv);
+		} else if (strcasecmp(argv[2], "stop") == 0) {
+			argv[1] = argv[2];
+			argv[2] = argv[3];
+			return conf_api_sub_norecord(conference,stream,4,argv);
+		} else if (strcasecmp(argv[2], "check") == 0) {
+			argv[1] = argv[2];
+			argv[2] = argv[3];
+			return conf_api_sub_check_record(conference,stream,4,argv);
+		} else if (strcasecmp(argv[2], "pause") == 0) {
+			argv[1] = argv[2];
+			argv[2] = argv[3];
+			return conf_api_sub_pauserec(conference,stream,4,argv);
+		} else if (strcasecmp(argv[2], "resume") == 0) {
+			argv[1] = argv[2];
+			argv[2] = argv[3];
+			return conf_api_sub_pauserec(conference,stream,4,argv);
+		} else {
+			return SWITCH_STATUS_GENERR;
+		}
+	}
+}
+
 static switch_status_t conf_api_sub_pin(conference_obj_t *conference, switch_stream_handle_t *stream, int argc, char **argv)
 {
 	switch_assert(conference != NULL);
@@ -5895,12 +6270,17 @@ static api_command_t conf_api_sub_commands[] = {
 	{"record", (void_fn_t) & conf_api_sub_record, CONF_API_SUB_ARGS_SPLIT, "record", "<filename>"},
 	{"chkrecord", (void_fn_t) & conf_api_sub_check_record, CONF_API_SUB_ARGS_SPLIT, "chkrecord", "<confname>"},
 	{"norecord", (void_fn_t) & conf_api_sub_norecord, CONF_API_SUB_ARGS_SPLIT, "norecord", "<[filename|all]>"},
+	{"pause", (void_fn_t) & conf_api_sub_pauserec, CONF_API_SUB_ARGS_SPLIT, "pause", "<filename>"},
+	{"resume", (void_fn_t) & conf_api_sub_pauserec, CONF_API_SUB_ARGS_SPLIT, "resume", "<filename>"},
+	{"recording", (void_fn_t) & conf_api_sub_recording, CONF_API_SUB_ARGS_SPLIT, "recording", "[start|stop|check|pause|resume] [<filename>|all]"},
 	{"exit_sound", (void_fn_t) & conf_api_sub_exit_sound, CONF_API_SUB_ARGS_SPLIT, "exit_sound", "on|off|none|file <filename>"},
 	{"enter_sound", (void_fn_t) & conf_api_sub_enter_sound, CONF_API_SUB_ARGS_SPLIT, "enter_sound", "on|off|none|file <filename>"},
 	{"pin", (void_fn_t) & conf_api_sub_pin, CONF_API_SUB_ARGS_SPLIT, "pin", "<pin#>"},
 	{"nopin", (void_fn_t) & conf_api_sub_pin, CONF_API_SUB_ARGS_SPLIT, "nopin", ""},
 	{"get", (void_fn_t) & conf_api_sub_get, CONF_API_SUB_ARGS_SPLIT, "get", "<parameter-name>"},
 	{"set", (void_fn_t) & conf_api_sub_set, CONF_API_SUB_ARGS_SPLIT, "set", "<parameter-name> <value>"},
+	{"floor", (void_fn_t) & conf_api_sub_floor, CONF_API_SUB_MEMBER_TARGET, "floor", "<member_id|last>"},
+	{"enforce_floor", (void_fn_t) & conf_api_sub_enforce_floor, CONF_API_SUB_MEMBER_TARGET, "enforce_floor", "<member_id|last>"},
 };
 
 #define CONFFUNCAPISIZE (sizeof(conf_api_sub_commands)/sizeof(conf_api_sub_commands[0]))
@@ -6122,6 +6502,11 @@ static switch_status_t conference_outcall(conference_obj_t *conference,
 	int rdlock = 0;
 	switch_bool_t have_flags = SWITCH_FALSE;
 	const char *outcall_flags;
+	int track = 0;
+
+	if (var_event && switch_true(switch_event_get_header(var_event, "conference_track_status"))) {
+		track++;
+	}
 
 	*cause = SWITCH_CAUSE_NORMAL_CLEARING;
 
@@ -6163,6 +6548,12 @@ static switch_status_t conference_outcall(conference_obj_t *conference,
 	switch_mutex_lock(conference->mutex);
 	conference->originating++;
 	switch_mutex_unlock(conference->mutex);
+
+	if (track) {
+		send_conference_notify(conference, "SIP/2.0 100 Trying\r\n", SWITCH_FALSE);
+	}
+
+
 	status = switch_ivr_originate(session, &peer_session, cause, bridgeto, timeout, NULL, cid_name, cid_num, NULL, var_event, SOF_NO_LIMITS, cancel_cause);
 	switch_mutex_lock(conference->mutex);
 	conference->originating--;
@@ -6174,7 +6565,16 @@ static switch_status_t conference_outcall(conference_obj_t *conference,
 		if (caller_channel) {
 			switch_channel_hangup(caller_channel, *cause);
 		}
+
+		if (track) {
+			send_conference_notify(conference, "SIP/2.0 481 Failure\r\n", SWITCH_TRUE);
+		}
+
 		goto done;
+	}
+
+	if (track) {
+		send_conference_notify(conference, "SIP/2.0 200 OK\r\n", SWITCH_TRUE);
 	}
 
 	rdlock = 1;
@@ -7429,7 +7829,7 @@ static switch_status_t chat_send(switch_event_t *message_event)
 	}
 
 	if (!(conference = conference_find(name, NULL))) {
-		switch_core_chat_send_args(proto, CONF_CHAT_PROTO, to, hint && strchr(hint, '/') ? hint : from, "", "Conference not active.", NULL, NULL);
+		switch_core_chat_send_args(proto, CONF_CHAT_PROTO, to, hint && strchr(hint, '/') ? hint : from, "", "Conference not active.", NULL, NULL, SWITCH_FALSE);
 		return SWITCH_STATUS_FALSE;
 	}
 
@@ -7447,7 +7847,7 @@ static switch_status_t chat_send(switch_event_t *message_event)
 
 	switch_safe_free(lbuf);
 
-	switch_core_chat_send_args(proto, CONF_CHAT_PROTO, to, hint && strchr(hint, '/') ? hint : from, "", stream.data, NULL, NULL);
+	switch_core_chat_send_args(proto, CONF_CHAT_PROTO, to, hint && strchr(hint, '/') ? hint : from, "", stream.data, NULL, NULL, SWITCH_FALSE);
 	switch_safe_free(stream.data);
 	switch_thread_rwlock_unlock(conference->rwlock);
 
@@ -7464,9 +7864,7 @@ static conference_obj_t *conference_find(char *name, char *domain)
 			switch_core_hash_delete(globals.conference_hash, conference->name);
 			switch_clear_flag(conference, CFLAG_INHASH);
 			conference = NULL;
-		}
-
-		if (!zstr(domain) && conference->domain && strcasecmp(domain, conference->domain)) {
+		} else if (!zstr(domain) && conference->domain && strcasecmp(domain, conference->domain)) {
 			conference = NULL;
 		}
 	}
@@ -7955,14 +8353,14 @@ static conference_obj_t *conference_new(char *name, conf_xml_cfg_t cfg, switch_c
 
 	conference->name = switch_core_strdup(conference->pool, name);
 
-	if (presence_id && (name_domain = strchr(presence_id, '@'))) {
-		name_domain++;
-		conference->domain = switch_core_strdup(conference->pool, name_domain);
-	} else if ((name_domain = strchr(conference->name, '@'))) {
+	if ((name_domain = strchr(conference->name, '@'))) {
 		name_domain++;
 		conference->domain = switch_core_strdup(conference->pool, name_domain);
 	} else if (domain) {
 		conference->domain = switch_core_strdup(conference->pool, domain);
+	} else if (presence_id && (name_domain = strchr(presence_id, '@'))) {
+		name_domain++;
+		conference->domain = switch_core_strdup(conference->pool, name_domain);
 	} else {
 		conference->domain = "cluecon.com";
 	}
@@ -8098,7 +8496,7 @@ static void call_setup_event_handler(switch_event_t *event)
 	char *dial_uri = switch_event_get_header(event, "Request-Target-URI");
 	char *action = switch_event_get_header(event, "Request-Action");
 	char *ext = switch_event_get_header(event, "Request-Target-Extension");
-	
+	char *full_url = switch_event_get_header(event, "full_url");
 
 	if (!ext) ext = dial_str;
 
@@ -8127,9 +8525,11 @@ static void call_setup_event_handler(switch_event_t *event)
 
 				switch_event_add_header_string(var_event, SWITCH_STACK_BOTTOM, "conference_invite_uri", dial_uri);
 
+				switch_event_add_header_string(var_event, SWITCH_STACK_BOTTOM, "conference_track_status", "true");
+
 				if (!strncasecmp(ostr, "url+", 4)) {
 					ostr += 4;
-				} else if (conference->outcall_templ) {
+				} else if (!switch_true(full_url) && conference->outcall_templ) {
 					if ((expanded = switch_event_expand_headers(var_event, conference->outcall_templ))) {
 						ostr = expanded;
 					}
@@ -8363,7 +8763,9 @@ static struct _mapping control_mappings[] = {
     {"event", conference_loop_fn_event},
     {"lock", conference_loop_fn_lock_toggle},
     {"transfer", conference_loop_fn_transfer},
-    {"execute_application", conference_loop_fn_exec_app}
+    {"execute_application", conference_loop_fn_exec_app},
+    {"floor", conference_loop_fn_floor_toggle},
+    {"enforce_floor", conference_loop_fn_enforce_floor},
 };
 #define MAPPING_LEN (sizeof(control_mappings)/sizeof(control_mappings[0]))
 

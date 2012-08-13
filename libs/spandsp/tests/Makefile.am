@@ -109,6 +109,10 @@ noinst_PROGRAMS =   ademco_contactid_tests \
                     t38_decode \
                     t38_non_ecm_buffer_tests \
                     t4_tests \
+                    t4_t6_tests \
+                    t42_tests \
+                    t81_t82_arith_coding_tests \
+                    t85_tests \
                     time_scale_tests \
                     timezone_tests \
                     tone_detect_tests \
@@ -123,8 +127,7 @@ noinst_PROGRAMS =   ademco_contactid_tests \
                     v42bis_tests \
                     v8_tests \
                     vector_float_tests \
-                    vector_int_tests \
-                    tsb85_tests
+                    vector_int_tests
 
 noinst_HEADERS =    echo_monitor.h \
                     fax_tester.h \
@@ -311,6 +314,18 @@ t38_non_ecm_buffer_tests_LDADD = $(LIBDIR) -lspandsp
 
 t4_tests_SOURCES = t4_tests.c
 t4_tests_LDADD = $(LIBDIR) -lspandsp
+
+t4_t6_tests_SOURCES = t4_t6_tests.c
+t4_t6_tests_LDADD = $(LIBDIR) -lspandsp
+
+t42_tests_SOURCES = t42_tests.c
+t42_tests_LDADD = $(LIBDIR) -lspandsp
+
+t81_t82_arith_coding_tests_SOURCES = t81_t82_arith_coding_tests.c
+t81_t82_arith_coding_tests_LDADD = $(LIBDIR) -lspandsp
+
+t85_tests_SOURCES = t85_tests.c
+t85_tests_LDADD = $(LIBDIR) -lspandsp
 
 time_scale_tests_SOURCES = time_scale_tests.c
 time_scale_tests_LDADD = $(LIBDIR) -lspandsp

@@ -630,7 +630,7 @@ static int next_step(faxtester_state_t *s)
     int compression_type;
     int timer;
     int len;
-    t4_state_t t4_tx_state;
+    t4_tx_state_t t4_tx_state;
     t30_state_t *t30;
 
     if (s->cur == NULL)
@@ -972,7 +972,6 @@ static int next_step(faxtester_state_t *s)
                 printf("Test failed\n");
                 exit(2);
             }
-            t4_tx_set_min_bits_per_row(&t4_tx_state, min_row_bits);
             t4_tx_set_header_info(&t4_tx_state, NULL);
             compression_type = T4_COMPRESSION_ITU_T4_1D;
             if (compression)
@@ -983,20 +982,21 @@ static int next_step(faxtester_state_t *s)
                     compression_type = T4_COMPRESSION_ITU_T6;
             }
             t4_tx_set_tx_encoding(&t4_tx_state, compression_type);
+            t4_tx_set_min_bits_per_row(&t4_tx_state, min_row_bits);
             if (t4_tx_start_page(&t4_tx_state))
             {
                 span_log(&s->logging, SPAN_LOG_FLOW, "Failed to start T.4 send\n");
                 printf("Test failed\n");
                 exit(2);
             }
-            len = t4_tx_get_chunk(&t4_tx_state, image, sizeof(image));
+            len = t4_tx_get(&t4_tx_state, image, sizeof(image));
             if (bad_rows)
             {
                 span_log(&s->logging, SPAN_LOG_FLOW, "We need to corrupt the image\n");
                 corrupt_image(s, image, len, (const char *) bad_rows);
             }
             t4_tx_release(&t4_tx_state);
-            span_log(&s->logging, SPAN_LOG_FLOW, "Non-ECM image is %d bytes\n", len);
+            span_log(&s->logging, SPAN_LOG_FLOW, "Non-ECM image is %d bytes (min row bits %d)\n", len, min_row_bits);
             faxtester_set_non_ecm_image_buffer(s, image, len);
         }
         else if (strcasecmp((const char *) type, "PP") == 0)
@@ -1012,7 +1012,6 @@ static int next_step(faxtester_state_t *s)
                 printf("Test failed\n");
                 exit(2);
             }
-            t4_tx_set_min_bits_per_row(&t4_tx_state, min_row_bits);
             t4_tx_set_header_info(&t4_tx_state, NULL);
             compression_type = T4_COMPRESSION_ITU_T4_1D;
             if (compression)
@@ -1023,6 +1022,7 @@ static int next_step(faxtester_state_t *s)
                     compression_type = T4_COMPRESSION_ITU_T6;
             }
             t4_tx_set_tx_encoding(&t4_tx_state, compression_type);
+            t4_tx_set_min_bits_per_row(&t4_tx_state, min_row_bits);
             if (t4_tx_start_page(&t4_tx_state))
             {
                 span_log(&s->logging, SPAN_LOG_FLOW, "Failed to start T.4 send\n");
@@ -1030,7 +1030,7 @@ static int next_step(faxtester_state_t *s)
                 exit(2);
             }
             /*endif*/
-            len = t4_tx_get_chunk(&t4_tx_state, image, sizeof(image));
+            len = t4_tx_get(&t4_tx_state, image, sizeof(image));
             if (bad_rows)
             {
                 span_log(&s->logging, SPAN_LOG_FLOW, "We need to corrupt the image\n");
@@ -1038,7 +1038,7 @@ static int next_step(faxtester_state_t *s)
             }
             /*endif*/
             t4_tx_release(&t4_tx_state);
-            span_log(&s->logging, SPAN_LOG_FLOW, "ECM image is %d bytes\n", len);
+            span_log(&s->logging, SPAN_LOG_FLOW, "ECM image is %d bytes (min row bits %d)\n", len, min_row_bits);
             faxtester_set_ecm_image_buffer(s, image, len, ecm_block, ecm_frame_size, i);
         }
         else

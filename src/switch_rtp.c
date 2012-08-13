@@ -1229,7 +1229,7 @@ SWITCH_DECLARE(void) switch_rtp_release_port(const char *ip, switch_port_t port)
 {
 	switch_core_port_allocator_t *alloc = NULL;
 
-	if (!ip) {
+	if (!ip || !port) {
 		return;
 	}
 
@@ -1687,6 +1687,8 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_add_crypto_key(switch_rtp_t *rtp_sess
 	rtp_session->crypto_keys[direction] = crypto_key;
 
 	memset(policy, 0, sizeof(*policy));
+
+	switch_channel_set_variable(channel, "send_silence_when_idle", "true");
 
 	switch (crypto_key->type) {
 	case AES_CM_128_HMAC_SHA1_80:
@@ -2947,7 +2949,7 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 #endif
 			
 #ifdef ENABLE_SRTP
-			if (switch_test_flag(rtp_session, SWITCH_RTP_FLAG_SECURE_RECV)) {
+			if (switch_test_flag(rtp_session, SWITCH_RTP_FLAG_SECURE_RECV) && (!rtp_session->ice.ice_user || rtp_session->recv_msg.header.version == 2)) {
 				int sbytes = (int) *bytes;
 				err_status_t stat = 0;
 
@@ -3066,7 +3068,7 @@ static switch_status_t read_rtcp_packet(switch_rtp_t *rtp_session, switch_size_t
 	}
 
 #ifdef ENABLE_SRTP
-	if (switch_test_flag(rtp_session, SWITCH_RTP_FLAG_SECURE_RECV)) {
+	if (switch_test_flag(rtp_session, SWITCH_RTP_FLAG_SECURE_RECV) && (!rtp_session->ice.ice_user || rtp_session->rtcp_recv_msg.header.version == 2)) {
 		int sbytes = (int) *bytes;
 		err_status_t stat = 0;
 
@@ -4128,7 +4130,8 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 		send_msg->header.m = (m && !(rtp_session->rtp_bugs & RTP_BUG_NEVER_SEND_MARKER)) ? 1 : 0;
 
 		/* If the marker was set, and the timestamp seems to have started over - set a new SSRC, to indicate this is a new stream */
-		if (send_msg->header.m && !(rtp_session->rtp_bugs & RTP_BUG_NEVER_CHANGE_SSRC_ON_MARKER) && (rtp_session->last_write_ts == RTP_TS_RESET ||
+		if (send_msg->header.m && !switch_test_flag(rtp_session, SWITCH_RTP_FLAG_SECURE_SEND) &&
+			(rtp_session->rtp_bugs & RTP_BUG_CHANGE_SSRC_ON_MARKER) && (rtp_session->last_write_ts == RTP_TS_RESET ||
 			(rtp_session->ts <= rtp_session->last_write_ts && rtp_session->last_write_ts > 0))) {
 				switch_rtp_set_ssrc(rtp_session, (uint32_t) ((intptr_t) rtp_session + (uint32_t) switch_epoch_time_now(NULL)));
 		}
@@ -4499,6 +4502,8 @@ SWITCH_DECLARE(int) switch_rtp_write_frame(switch_rtp_t *rtp_session, switch_fra
 	
 	if (switch_test_flag(frame, SFF_PROXY_PACKET) || switch_test_flag(frame, SFF_UDPTL_PACKET) ||
 		switch_test_flag(rtp_session, SWITCH_RTP_FLAG_PROXY_MEDIA) || switch_test_flag(rtp_session, SWITCH_RTP_FLAG_UDPTL)) {
+		
+	//if (switch_test_flag(rtp_session, SWITCH_RTP_FLAG_PROXY_MEDIA) || switch_test_flag(rtp_session, SWITCH_RTP_FLAG_UDPTL)) {
 		switch_size_t bytes;
 		//char bufa[30];
 
@@ -4512,11 +4517,14 @@ SWITCH_DECLARE(int) switch_rtp_write_frame(switch_rtp_t *rtp_session, switch_fra
 
 		send_msg = frame->packet;
 
-		/*
-		  if (switch_test_flag(rtp_session, SWITCH_RTP_FLAG_VIDEO)) {
-		  send_msg->header.pt = rtp_session->payload;
-		  }
-		*/
+		if (!switch_test_flag(rtp_session, SWITCH_RTP_FLAG_UDPTL)) {
+			if (switch_test_flag(rtp_session, SWITCH_RTP_FLAG_VIDEO)) {
+				send_msg->header.pt = rtp_session->payload;
+			}
+		
+			send_msg->header.ssrc = htonl(rtp_session->ssrc);
+		}
+
 
 		if (switch_socket_sendto(rtp_session->sock_output, rtp_session->remote_addr, 0, frame->packet, &bytes) != SWITCH_STATUS_SUCCESS) {
 			return -1;
